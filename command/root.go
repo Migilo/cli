@@ -18,6 +18,7 @@ import (
 	"github.com/cli/cli/pkg/cmdutil"
 	"github.com/cli/cli/pkg/iostreams"
 	"github.com/cli/cli/utils"
+	"github.com/google/shlex"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -180,24 +181,16 @@ var apiClientForContext = func(ctx context.Context) (*api.Client, error) {
 
 	checkScopesFunc := func(appID string) error {
 		if config.IsGitHubApp(appID) && !tokenFromEnv() && utils.IsTerminal(os.Stdin) && utils.IsTerminal(os.Stderr) {
-			newToken, loginHandle, err := config.AuthFlow("Notice: additional authorization required")
-			if err != nil {
-				return err
-			}
 			cfg, err := ctx.Config()
 			if err != nil {
 				return err
 			}
-			_ = cfg.Set(defaultHostname, "oauth_token", newToken)
-			_ = cfg.Set(defaultHostname, "user", loginHandle)
-			// update config file on disk
-			err = cfg.Write()
+			newToken, err := config.AuthFlowWithConfig(cfg, defaultHostname, "Notice: additional authorization required")
 			if err != nil {
 				return err
 			}
 			// update configuration in memory
 			token = newToken
-			config.AuthFlowComplete()
 		} else {
 			fmt.Fprintln(os.Stderr, "Warning: gh now requires the `read:org` OAuth scope.")
 			fmt.Fprintln(os.Stderr, "Visit https://github.com/settings/tokens and edit your token to enable `read:org`")
@@ -234,28 +227,19 @@ var ensureScopes = func(ctx context.Context, client *api.Client, wantedScopes ..
 	tokenFromEnv := len(os.Getenv("GITHUB_TOKEN")) > 0
 
 	if config.IsGitHubApp(appID) && !tokenFromEnv && utils.IsTerminal(os.Stdin) && utils.IsTerminal(os.Stderr) {
-		newToken, loginHandle, err := config.AuthFlow("Notice: additional authorization required")
-		if err != nil {
-			return client, err
-		}
 		cfg, err := ctx.Config()
 		if err != nil {
-			return client, err
+			return nil, err
 		}
-		_ = cfg.Set(defaultHostname, "oauth_token", newToken)
-		_ = cfg.Set(defaultHostname, "user", loginHandle)
-		// update config file on disk
-		err = cfg.Write()
+		_, err = config.AuthFlowWithConfig(cfg, defaultHostname, "Notice: additional authorization required")
 		if err != nil {
-			return client, err
+			return nil, err
 		}
-		// update configuration in memory
-		config.AuthFlowComplete()
+
 		reloadedClient, err := apiClientForContext(ctx)
 		if err != nil {
 			return client, err
 		}
-
 		return reloadedClient, nil
 	} else {
 		fmt.Fprintln(os.Stderr, fmt.Sprintf("Warning: gh now requires %s OAuth scopes.", wantedScopes))
@@ -336,9 +320,33 @@ func determineBaseRepo(apiClient *api.Client, cmd *cobra.Command, ctx context.Co
 	return baseRepo, nil
 }
 
-func rootHelpFunc(command *cobra.Command, s []string) {
+func rootHelpFunc(command *cobra.Command, args []string) {
 	if command != RootCmd {
-		cobraDefaultHelpFunc(command, s)
+		// Display helpful error message in case subcommand name was mistyped.
+		// This matches Cobra's behavior for root command, which Cobra
+		// confusingly doesn't apply to nested commands.
+		if command.Parent() == RootCmd && len(args) >= 2 {
+			if command.SuggestionsMinimumDistance <= 0 {
+				command.SuggestionsMinimumDistance = 2
+			}
+			candidates := command.SuggestionsFor(args[1])
+
+			errOut := command.OutOrStderr()
+			fmt.Fprintf(errOut, "unknown command %q for %q\n", args[1], "gh "+args[0])
+
+			if len(candidates) > 0 {
+				fmt.Fprint(errOut, "\nDid you mean this?\n")
+				for _, c := range candidates {
+					fmt.Fprintf(errOut, "\t%s\n", c)
+				}
+				fmt.Fprint(errOut, "\n")
+			}
+
+			oldOut := command.OutOrStdout()
+			command.SetOut(errOut)
+			defer command.SetOut(oldOut)
+		}
+		cobraDefaultHelpFunc(command, args)
 		return
 	}
 
@@ -437,4 +445,49 @@ func determineEditor(cmd *cobra.Command) (string, error) {
 	}
 
 	return editorCommand, nil
+}
+
+func ExpandAlias(args []string) ([]string, error) {
+	empty := []string{}
+	if len(args) < 2 {
+		// the command is lacking a subcommand
+		return empty, nil
+	}
+
+	ctx := initContext()
+	cfg, err := ctx.Config()
+	if err != nil {
+		return empty, err
+	}
+	aliases, err := cfg.Aliases()
+	if err != nil {
+		return empty, err
+	}
+
+	expansion, ok := aliases.Get(args[1])
+	if ok {
+		extraArgs := []string{}
+		for i, a := range args[2:] {
+			if !strings.Contains(expansion, "$") {
+				extraArgs = append(extraArgs, a)
+			} else {
+				expansion = strings.ReplaceAll(expansion, fmt.Sprintf("$%d", i+1), a)
+			}
+		}
+		lingeringRE := regexp.MustCompile(`\$\d`)
+		if lingeringRE.MatchString(expansion) {
+			return empty, fmt.Errorf("not enough arguments for alias: %s", expansion)
+		}
+
+		newArgs, err := shlex.Split(expansion)
+		if err != nil {
+			return nil, err
+		}
+
+		newArgs = append(newArgs, extraArgs...)
+
+		return newArgs, nil
+	}
+
+	return args[1:], nil
 }

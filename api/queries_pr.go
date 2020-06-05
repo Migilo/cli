@@ -205,9 +205,9 @@ func (pr *PullRequest) ChecksStatus() (summary PullRequestChecksStatus) {
 	return
 }
 
-func (c Client) PullRequestDiff(baseRepo ghrepo.Interface, prNum int) (string, error) {
+func (c Client) PullRequestDiff(baseRepo ghrepo.Interface, prNumber int) (string, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/pulls/%d",
-		ghrepo.FullName(baseRepo), prNum)
+		ghrepo.FullName(baseRepo), prNumber)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return "", err
@@ -235,7 +235,6 @@ func (c Client) PullRequestDiff(baseRepo ghrepo.Interface, prNum int) (string, e
 	}
 
 	return "", errors.New("pull request diff lookup failed")
-
 }
 
 func PullRequests(client *Client, repo ghrepo.Interface, currentPRNumber int, currentPRHeadRef, currentUsername string) (*PullRequestsPayload, error) {
@@ -994,23 +993,17 @@ func PullRequestMerge(client *Client, repo ghrepo.Interface, pr *PullRequest, m 
 
 func PullRequestReady(client *Client, repo ghrepo.Interface, pr *PullRequest) error {
 	var mutation struct {
-		MarkPullRequestReadyForReviewInput struct {
+		MarkPullRequestReadyForReview struct {
 			PullRequest struct {
 				ID githubv4.ID
 			}
 		} `graphql:"markPullRequestReadyForReview(input: $input)"`
 	}
 
-	type MarkPullRequestReadyForReviewInput struct {
-		PullRequestID githubv4.ID `json:"pullRequestId"`
-	}
-
-	input := MarkPullRequestReadyForReviewInput{PullRequestID: pr.ID}
+	input := githubv4.MarkPullRequestReadyForReviewInput{PullRequestID: pr.ID}
 
 	v4 := githubv4.NewClient(client.http)
-	err := v4.Mutate(context.Background(), &mutation, input, nil)
-
-	return err
+	return v4.Mutate(context.Background(), &mutation, input, nil)
 }
 
 func BranchDeleteRemote(client *Client, repo ghrepo.Interface, branch string) error {
